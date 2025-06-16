@@ -1,0 +1,10 @@
+/* src/index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Здесь ваш дополнительный глобальный CSS */
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
