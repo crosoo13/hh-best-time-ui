@@ -7,7 +7,7 @@ import { fileURLToPath, URL } from 'node:url'
 // https://vitejs.dev/config/
 export default defineConfig({
   // 👇 ВОТ ЭТА СТРОКА. Замените 'hh-best-time-ui' на имя вашего репозитория, если оно другое.
-  base: '/hh-best-time-ui/', 
+  base: '/', 
   
   plugins: [react()],
   resolve: {
