@@ -1,121 +1,196 @@
-import React, { useState, FormEvent, useEffect } from 'react';
+import React, { useState, FormEvent, useCallback, useEffect, useMemo } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { API, weekFull, weekShort } from '../lib/constants';
+
+// UI Components
 import JobForm from '../components/JobForm';
 import StatsSummary from '../components/StatsSummary';
 import Charts from '../components/Charts';
 import BumpChart from '../components/BumpChart';
-import { API, weekFull, weekShort } from '../lib/constants';
+import AiRecommendationCard from '../components/AiRecommendationCard';
+import CompanyDetailPanel from '@/shared/ui/CompanyDetailPanel';
+import { LoadingSpinner } from '@/shared/ui/LoadingSpinner';
+import HeatmapChart from '../components/HeatmapChart.jsx';
+
+// Hooks
 import { useLoadingPhrases } from '../hooks/useLoadingPhrases';
+import { useVacancySearch } from '../hooks/useVacancySearch';
+import { useVacancyProcessor } from '../hooks/useVacancyProcessor';
+import { useBodyScrollLock } from '@/shared/hooks/useBodyScrollLock';
+
+// Types and Analytics
+import { ActivityResponse } from '../lib/types';
+import { calculateAdvancedRecommendation } from '../lib/vacancyAnalytics';
+
 
 export default function TimePostingPage() {
-  const [job, setJob] = useState('');
-  const [city, setCity] = useState('');
-  const [fly, setFly] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
+    // State для формы и UI
+    const [job, setJob] = useState('');
+    const [city, setCity] = useState('');
+    const [fly, setFly] = useState(false);
+    const [excludedCompanies, setExcludedCompanies] = useState<string[]>([]);
+    const [isDetailPanelOpen, setIsDetailPanelOpen] = useState(false);
+    const [timeZoneDisplay, setTimeZoneDisplay] = useState<string | null>(null);
+    
+    // State для сырых данных по активности
+    const [heatmapData, setHeatmapData] = useState<ActivityResponse | null>(null);
 
-  const loadingText = useLoadingPhrases(loading);
+    // --- ПОТОКИ ДАННЫХ ---
 
-  useEffect(() => {
-    console.log('*** API data:', data);
-  }, [data]);
+    // 1. Основной поиск вакансий (hh-stats)
+    const { loading, error, apiResponse, search } = useVacancySearch();
 
-  const handleChange = (field: string, value: any) => {
-    if (field === 'job') setJob(value);
-    if (field === 'city') setCity(value);
-    if (field === 'fly') setFly(value);
-  };
+    // 2. СТАРЫЙ ПОТОК: Этот хук и его результат 'displayData' остаются для совместимости со старыми графиками.
+    const { displayData, allCompanies } = useVacancyProcessor(apiResponse, excludedCompanies);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
-    setData(null);
-    try {
-      const url = new URL(API);
-      url.searchParams.set('job', job);
-      url.searchParams.set('city', city);
-      if (fly) url.searchParams.set('fly', '1');
-      const res = await fetch(url.toString());
-      if (!res.ok) throw new Error(await res.text() || res.statusText);
-      
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { error: logError } = await supabase
-          .from('analysis_requests')
-          .insert({
-            user_id: user.id,
-            query_details: {
-              request_type: 'time_posting',
-              job: job,
-              city: city,
-              fly: fly
-            }
-          });
-        if (logError) {
-          console.error('Ошибка логирования запроса (TimePosting):', logError.message);
+    // 3. НОВЫЙ ПОТОК: Продвинутый анализ для AiRecommendationCard с учетом часового пояса.
+    const advancedRecommendation = useMemo(() => {
+        const regionUtcOffset = apiResponse?.timeZone?.utc_diff;
+        return calculateAdvancedRecommendation(apiResponse, heatmapData, regionUtcOffset);
+    }, [apiResponse, heatmapData]);
+
+    // --- Вспомогательные хуки ---
+    const loadingText = useLoadingPhrases(loading);
+    useBodyScrollLock(isDetailPanelOpen);
+
+    // Эффекты для часового пояса и логирования ошибок
+    useEffect(() => {
+        const newTimeZone = apiResponse?.timeZone?.display || heatmapData?.timeZone?.display;
+        if (newTimeZone) {
+            setTimeZoneDisplay(newTimeZone);
         }
-      }
+    }, [apiResponse, heatmapData]);
 
-      const json = await res.json();
-      const jsonWithFallback = { ...json, bumpDates: json.bumpDates || {} };
-      setData(jsonWithFallback);
-    } catch (err: any)
-    {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+    useEffect(() => {
+        if (error) {
+            console.error("Ошибка основного поиска вакансий:", error);
+        }
+    }, [error]);
 
+    // Обработчик отправки формы
+    const handleSubmit = async (e: FormEvent) => {
+        e.preventDefault();
+        setIsDetailPanelOpen(false);
+        setExcludedCompanies([]);
+        setHeatmapData(null);
+        setTimeZoneDisplay(null);
+        
+        search(job, city, fly);
 
-  return (
-    <div className="container mx-auto p-4 space-y-8">
-      
-      <JobForm
-        job={job}
-        city={city}
-        fly={fly}
-        loading={loading}
-        onChange={handleChange}
-        onSubmit={handleSubmit}
-      />
+        if (city) {
+            try {
+                const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+                if (sessionError || !session) {
+                    throw new Error('Не удалось получить сессию пользователя.');
+                }
+                
+                const endpoint = `${API}/api/activity?city=${encodeURIComponent(city)}&job=${encodeURIComponent(job)}`;
+                const response = await fetch(endpoint, {
+                    headers: { 'Authorization': `Bearer ${session.access_token}` }
+                });
 
-      {error && <div className="text-center p-4 text-red-600 bg-red-100 rounded-lg">{error}</div>}
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error || 'Не удалось загрузить данные для карты активности');
+                }
 
-      {loading && (
-        <div className="flex items-center justify-center py-8 space-x-4">
-          <svg className="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-          <span className="text-lg text-gray-600 font-medium">{loadingText}</span>
-        </div>
-      )}
+                const data: ActivityResponse = await response.json();
+                setHeatmapData(data);
 
-      {data && !loading && (
-        <div className="space-y-8">
-          
-          {(typeof data.total === 'number' && data.companies) && (
-            <StatsSummary total={data.total} companies={data.companies} />
-          )}
+            } catch (err: any) {
+                console.error("Ошибка при загрузке данных для тепловой карты:", err.message);
+                setHeatmapData(null);
+            }
+        }
+    };
 
-          {(data.days && data.hours) && (
-            <Charts
-              days={data.days}
-              hours={data.hours}
-              weekFull={weekFull}
-              weekShort={weekShort}
-            />
-          )}
+    // Обработчик изменения полей формы
+    const handleChange = useCallback((field: string, value: any) => {
+        if (field === 'job') setJob(value);
+        if (field === 'city') setCity(value);
+        if (field === 'fly') setFly(value);
+    }, []);
 
-          {data.bumpDates && (
-            <BumpChart bumpDates={data.bumpDates} />
-          )}
-          
-        </div>
-      )}
-    </div>
-  );
+    // Обработчик исключения компаний
+    const toggleCompanyExclusion = (companyName: string) => {
+        setExcludedCompanies(prev =>
+            prev.includes(companyName) ? prev.filter(n => n !== companyName) : [...prev, companyName]
+        );
+    };
+
+    return (
+        <>
+            <div className="container mx-auto p-4 space-y-8">
+                <JobForm
+                    job={job} city={city} fly={fly} loading={loading}
+                    onChange={handleChange} onSubmit={handleSubmit}
+                />
+
+                {error && (
+                    <div className="text-center p-4 text-red-600 bg-red-100 rounded-lg">
+                        Ошибка. Попробуйте позже
+                    </div>
+                )}
+
+                {loading && <LoadingSpinner text={loadingText} />}
+
+                {displayData && !loading && (
+                    <div className="space-y-8">
+                        <div className="flex flex-col lg:flex-row gap-8">
+                            <div className="lg:w-1/2">
+                                {/* Этот компонент использует СТАРЫЙ поток (displayData) */}
+                                <StatsSummary
+                                    total={displayData.total}
+                                    companies={displayData.companies}
+                                    onShowDetails={() => setIsDetailPanelOpen(true)}
+                                />
+                            </div>
+                            <div className="lg:w-1/2">
+                                {/* Этот компонент использует НОВЫЙ поток и получает часовой пояс */}
+                                <AiRecommendationCard 
+                                    recommendation={advancedRecommendation} 
+                                    timeZoneDisplay={timeZoneDisplay}
+                                />
+                            </div>
+                        </div>
+                        {/* Эти компоненты используют СТАРЫЙ поток (displayData) */}
+                        <Charts
+                            days={displayData.days} hours={displayData.hours}
+                            weekFull={weekFull} weekShort={weekShort}
+                            timeZoneDisplay={timeZoneDisplay} 
+                        />
+                        <BumpChart bumpDates={displayData.bumpDates} />
+                    </div>
+                )}
+                
+                {/* Этот блок использует сырые данные heatmapData */}
+                {!loading && !error && (
+                    <div className="mt-8">
+                        {heatmapData && heatmapData.heatmapData.length > 0 && (
+                            <HeatmapChart 
+                                data={heatmapData.heatmapData} 
+                                timeZoneDisplay={timeZoneDisplay} 
+                            />
+                        )}
+                        
+                        {heatmapData && heatmapData.heatmapData.length === 0 && (
+                            <div className="text-center bg-white border rounded-lg p-8">
+                                <p className="text-gray-500">Данные об активности для этого региона и профессии в нашей базе отсутствуют.</p>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {isDetailPanelOpen && (
+                <CompanyDetailPanel
+                    companies={allCompanies}
+                    title={`Все компании (${Object.keys(allCompanies).length})`}
+                    excludedCompanies={excludedCompanies}
+                    onToggleExclusion={toggleCompanyExclusion}
+                    onClose={() => setIsDetailPanelOpen(false)}
+                />
+            )}
+        </>
+    );
 }

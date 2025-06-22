@@ -1,30 +1,27 @@
 import { useState, useEffect, FormEvent } from 'react';
-import { supabase } from '@/lib/supabaseClient';
-import CompanyDetailPanel from '@/shared/ui/CompanyDetailPanel';
-import type { ApiResponse, Result } from '../model/types';
+import { useAnalysisRequest } from '../hooks/useAnalysisRequest';
+import { useMarketAnalysis } from '../hooks/useMarketAnalysis';
+import { useLoadingPhrases } from '../hooks/useLoadingPhrases';
+
+import AnalysisForm from '../components/AnalysisForm';
 import AnalysisChartBlock from '../components/AnalysisChartBlock';
 import ResultCard from '../components/ResultCard';
 import FilterSlider from '../components/FilterSlider';
-import { useMarketAnalysis } from '../hooks/useMarketAnalysis';
-import AnalysisForm from '../components/AnalysisForm';
-import { useLoadingPhrases } from '../hooks/useLoadingPhrases';
+import CompanyDetailPanel from '@/shared/ui/CompanyDetailPanel'; // <-- Используем общий компонент
 
-const API_BASE_URL = 'https://api.hrvision.ru';
+import type { Result } from '../model/types';
 
 export default function MarketPage() {
   const [profession, setProfession] = useState('');
   const [location, setLocation] = useState('');
-  
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<ApiResponse | null>(null);
-
+  const { loading, error, data, start, setError } = useAnalysisRequest();
   const loadingText = useLoadingPhrases(loading);
 
   const [activePanelData, setActivePanelData] = useState<Result | null>(null);
   const [chartMode, setChartMode] = useState<'fullDay' | 'rotation'>('fullDay');
   const [excludedCompanies, setExcludedCompanies] = useState<string[]>([]);
-  
+
+  // ... (остальные состояния и useEffect без изменений)
   const [fullDayRateRange, setFullDayRateRange] = useState<[number, number]>([0, 1]);
   const [rotationRateRange, setRotationRateRange] = useState<[number, number]>([0, 1]);
   const [fullDaySalaryRange, setFullDaySalaryRange] = useState<[number, number]>([0, 1]);
@@ -37,143 +34,72 @@ export default function MarketPage() {
   const [rotationMaxRate, setRotationMaxRate] = useState(1);
   const [fullDayMaxSalary, setFullDayMaxSalary] = useState(1);
   const [rotationMaxSalary, setRotationMaxSalary] = useState(1);
-  
+
   useEffect(() => {
-    if (data?.results) {
-      const fullDaySrc = data.results.find(r => r.mode === 'fullDay');
-      const rotationSrc = data.results.find(r => r.mode === 'rotation');
-      
-      const setupRanges = (source: Result | undefined, setMin: Function, setMax: Function, setRange: Function, key: 'avg_hourly_rate' | 'avg_monthly_salary') => {
-        const values = source?.companies?.map(c => c[key]).filter(v => typeof v === 'number' && v > 0) || [];
-        if (values.length > 0) {
-          const minVal = Math.floor(Math.min(...values));
-          const maxVal = Math.ceil(Math.max(...values));
-          setMin(minVal);
-          setMax(maxVal > 0 ? maxVal : 1);
-          setRange([minVal, maxVal]);
-        }
-      };
-
-      setupRanges(fullDaySrc, setFullDayMinRate, setFullDayMaxRate, setFullDayRateRange, 'avg_hourly_rate');
-      setupRanges(rotationSrc, setRotationMinRate, setRotationMaxRate, setRotationRateRange, 'avg_hourly_rate');
-      setupRanges(fullDaySrc, setFullDayMinSalary, setFullDayMaxSalary, setFullDaySalaryRange, 'avg_monthly_salary');
-      setupRanges(rotationSrc, setRotationMinSalary, setRotationMaxSalary, setRotationSalaryRange, 'avg_monthly_salary');
-    }
-  }, [data]);
-
-  const toggleCompanyExclusion = (companyName: string) => {
-    setExcludedCompanies(prev => prev.includes(companyName) ? prev.filter(name => name !== companyName) : [...prev, companyName]);
-  };
-
-  const pollForResult = (jobId: string) => {
-    const RESULT_URL = `${API_BASE_URL}/hh/result/${jobId}`;
-    const POLLING_INTERVAL = 5000;
-    const MAX_ATTEMPTS = 60;
-
-    let attempts = 0;
-
-    const intervalId = setInterval(async () => {
-      if (attempts >= MAX_ATTEMPTS) {
-        clearInterval(intervalId);
-        setError("Не удалось получить результат вовремя. Попробуйте снова.");
-        setLoading(false);
+    if (!data?.results) return;
+    const calculateRanges = (
+      src: Result | undefined,
+      excluded: string[],
+      setMin: (n: number) => void,
+      setMax: (n: number) => void,
+      setRange: (r: [number, number]) => void,
+      key: 'avg_hourly_rate' | 'avg_monthly_salary'
+    ) => {
+      const values =
+        src?.companies
+          .filter(c => !excluded.includes(c.company_name))
+          .map(c => c[key])
+          .filter(v => typeof v === 'number' && v > 0) || [];
+      if (values.length === 0) {
+        setMin(0);
+        setMax(1);
+        setRange([0, 1]);
         return;
       }
+      const minV = Math.floor(Math.min(...values));
+      const maxV = Math.ceil(Math.max(...values));
+      setMin(minV);
+      setMax(maxV || 1);
+      setRange([minV, maxV]);
+    };
 
-      try {
-        const response = await fetch(RESULT_URL);
-        if (!response.ok) {
-          throw new Error('Ошибка при получении результата.');
-        }
+    const fullDaySrc = data.results.find(r => r.mode === 'fullDay');
+    const rotationSrc = data.results.find(r => r.mode === 'rotation');
 
-        const resultData: ApiResponse = await response.json();
-        
-        if (resultData && resultData.results.length > 0) {
-          clearInterval(intervalId);
-          setData(resultData);
-          setLoading(false);
-        } else {
-          attempts++;
-        }
-      } catch (e: any) {
-        clearInterval(intervalId);
-        setError(e.message);
-        setLoading(false);
-      }
-    }, POLLING_INTERVAL);
+    calculateRanges(fullDaySrc, excludedCompanies, setFullDayMinRate, setFullDayMaxRate, setFullDayRateRange, 'avg_hourly_rate');
+    calculateRanges(rotationSrc, excludedCompanies, setRotationMinRate, setRotationMaxRate, setRotationRateRange, 'avg_hourly_rate');
+    calculateRanges(fullDaySrc, excludedCompanies, setFullDayMinSalary, setFullDayMaxSalary, setFullDaySalaryRange, 'avg_monthly_salary');
+    calculateRanges(rotationSrc, excludedCompanies, setRotationMinSalary, setRotationMaxSalary, setRotationSalaryRange, 'avg_monthly_salary');
+  }, [data, excludedCompanies]);
+
+  const toggleCompanyExclusion = (name: string) => {
+    setExcludedCompanies(prev =>
+      prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]
+    );
   };
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!profession || !location) {
-      setError("Пожалуйста, заполните оба поля: Профессия и Регион.");
-      return;
-    }
-
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
     setExcludedCompanies([]);
-    setLoading(true);
-    setError(null);
-    setData(null);
     setActivePanelData(null);
-    
-    const API_URL = `${API_BASE_URL}/hh/analyze`;
-    const requestBody = [
-      { name: profession, schedule: 'fullDay', locations: [location] },
-      { name: profession, schedule: 'rotation', locations: [location] }
-    ];
-
-    try {
-      const response = await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Ошибка сети: ${response.statusText}`);
-      }
-
-      const { job_id } = await response.json();
-      if (job_id) {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-          const { error: logError } = await supabase
-            .from('analysis_requests')
-            .insert({ 
-              user_id: user.id, 
-              query_details: { profession, location } 
-            });
-
-          if (logError) {
-            console.error('Ошибка логирования запроса в Supabase:', logError.message);
-          }
-        }
-        
-        pollForResult(job_id);
-      } else {
-        throw new Error("Не удалось получить ID задачи от сервера.");
-      }
-    } catch (e: any) {
-      setError(e.message);
-      setLoading(false);
-    }
+    setError(null);
+    start(profession, location);
   };
 
   useEffect(() => {
-    if (activePanelData) { document.body.style.overflow = 'hidden'; } else { document.body.style.overflow = 'auto'; }
+    document.body.style.overflow = activePanelData ? 'hidden' : 'auto';
     return () => { document.body.style.overflow = 'auto'; };
   }, [activePanelData]);
 
   const fullDayData = data?.results.find(r => r.mode === 'fullDay');
   const rotationData = data?.results.find(r => r.mode === 'rotation');
-  
-  const processedFullDayData = useMarketAnalysis(fullDayData, excludedCompanies, fullDayRateRange, fullDaySalaryRange);
-  const processedRotationData = useMarketAnalysis(rotationData, excludedCompanies, rotationRateRange, rotationSalaryRange);
-  
-  const chartDisplayData = chartMode === 'fullDay' ? processedFullDayData : processedRotationData;
 
-  const RATE_CHART_COLOR = "#60a5fa";
-  const SALARY_CHART_COLOR = "#4ade80";
+  const processedFull = useMarketAnalysis(fullDayData, excludedCompanies, fullDayRateRange, fullDaySalaryRange);
+  const processedRot = useMarketAnalysis(rotationData, excludedCompanies, rotationRateRange, rotationSalaryRange);
+  const chartData = chartMode === 'fullDay' ? processedFull : processedRot;
+
+  const RATE_COLOR = '#60a5fa';
+  const SALARY_COLOR = '#4ade80';
 
   return (
     <>
@@ -186,34 +112,31 @@ export default function MarketPage() {
           onLocationChange={setLocation}
           onSubmit={handleSubmit}
         />
-
+        {/* ... (остальной JSX без изменений) ... */}
         {error && <div className="text-center p-4 text-red-600 bg-red-100 rounded-lg">{error}</div>}
-
         {loading && (
           <div className="flex items-center justify-center py-8 space-x-4">
             <svg className="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
             </svg>
             <span className="text-lg text-gray-600 font-medium">{loadingText}</span>
           </div>
         )}
-        
         {data && !loading && (
           <>
             <div className="grid lg:grid-cols-2 gap-8">
-              <ResultCard result={processedFullDayData.resultForCard} onShowDetails={() => setActivePanelData(fullDayData || null)} />
-              <ResultCard result={processedRotationData.resultForCard} onShowDetails={() => setActivePanelData(rotationData || null)} />
+              <ResultCard result={processedFull.resultForCard} onShowDetails={() => setActivePanelData(fullDayData || null)} />
+              <ResultCard result={processedRot.resultForCard} onShowDetails={() => setActivePanelData(rotationData || null)} />
             </div>
-
             <div className="space-y-8 mt-8">
               <div className="border rounded-lg bg-white shadow-sm">
-                <AnalysisChartBlock 
-                  title="Распределение средних ставок" 
-                  chartData={chartDisplayData.rateChartData} 
-                  averageValue={chartDisplayData.averageRate} 
-                  lineColor={RATE_CHART_COLOR} 
-                  dataLabel="Ставка" 
+                <AnalysisChartBlock
+                  title="Распределение средних ставок"
+                  chartData={chartData.rateChartData}
+                  averageValue={chartData.averageRate}
+                  lineColor={RATE_COLOR}
+                  dataLabel="Ставка"
                   unit="руб/час"
                   filterRange={chartMode === 'fullDay' ? fullDayRateRange : rotationRateRange}
                 >
@@ -222,35 +145,43 @@ export default function MarketPage() {
                     <button onClick={() => setChartMode('rotation')} className={`px-4 py-2 rounded-md text-sm font-medium ${chartMode === 'rotation' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700'}`}>Вахтовый метод</button>
                   </div>
                 </AnalysisChartBlock>
-                
-                {chartMode === 'fullDay' 
-                  ? <FilterSlider title="Фильтр по ставке" unit="₽/час" range={fullDayRateRange} min={fullDayMinRate} max={fullDayMaxRate} onChange={setFullDayRateRange} color={RATE_CHART_COLOR} />
-                  : <FilterSlider title="Фильтр по ставке" unit="₽/час" range={rotationRateRange} min={rotationMinRate} max={rotationMaxRate} onChange={setRotationRateRange} color={RATE_CHART_COLOR} />
-                }
+                {chartMode === 'fullDay' ? (
+                  <FilterSlider title="Фильтр по ставке" unit="₽/час" range={fullDayRateRange} min={fullDayMinRate} max={fullDayMaxRate} onChange={setFullDayRateRange} color={RATE_COLOR} />
+                ) : (
+                  <FilterSlider title="Фильтр по ставке" unit="₽/час" range={rotationRateRange} min={rotationMinRate} max={rotationMaxRate} onChange={setRotationRateRange} color={RATE_COLOR} />
+                )}
               </div>
-
               <div className="border rounded-lg bg-white shadow-sm">
-                <AnalysisChartBlock 
-                  title="Распределение средних зарплат" 
-                  chartData={chartDisplayData.salaryChartData} 
-                  averageValue={chartDisplayData.averageSalary} 
-                  lineColor={SALARY_CHART_COLOR} 
-                  dataLabel="Зарплата" 
+                <AnalysisChartBlock
+                  title="Распределение средних зарплат"
+                  chartData={chartData.salaryChartData}
+                  averageValue={chartData.averageSalary}
+                  lineColor={SALARY_COLOR}
+                  dataLabel="Зарплата"
                   unit="руб/мес"
                   filterRange={chartMode === 'fullDay' ? fullDaySalaryRange : rotationSalaryRange}
                 />
-                
-                {chartMode === 'fullDay'
-                  ? <FilterSlider title="Фильтр по зарплате" unit="₽/мес" range={fullDaySalaryRange} min={fullDayMinSalary} max={fullDayMaxSalary} onChange={setFullDaySalaryRange} color={SALARY_CHART_COLOR} />
-                  : <FilterSlider title="Фильтр по зарплате" unit="₽/мес" range={rotationSalaryRange} min={rotationMinSalary} max={rotationMaxSalary} onChange={setRotationSalaryRange} color={SALARY_CHART_COLOR} />
-                }
+                {chartMode === 'fullDay' ? (
+                  <FilterSlider title="Фильтр по зарплате" unit="₽/мес" range={fullDaySalaryRange} min={fullDayMinSalary} max={fullDayMaxSalary} onChange={setFullDaySalaryRange} color={SALARY_COLOR} />
+                ) : (
+                  <FilterSlider title="Фильтр по зарплате" unit="₽/мес" range={rotationSalaryRange} min={rotationMinSalary} max={rotationMaxSalary} onChange={setRotationSalaryRange} color={SALARY_COLOR} />
+                )}
               </div>
             </div>
           </>
         )}
       </div>
-      
-      {activePanelData && <CompanyDetailPanel data={activePanelData} onClose={() => setActivePanelData(null)} excludedCompanies={excludedCompanies} onToggleExclusion={toggleCompanyExclusion} />}
+
+      {/* --- ИЗМЕНЕНИЕ ЗДЕСЬ --- */}
+      {activePanelData && (
+        <CompanyDetailPanel
+          data={activePanelData}
+          title={`Компании (${activePanelData.mode === 'rotation' ? 'Вахта' : 'Полный день'})`}
+          onClose={() => setActivePanelData(null)}
+          excludedCompanies={excludedCompanies}
+          onToggleExclusion={toggleCompanyExclusion}
+        />
+      )}
     </>
   );
 }
